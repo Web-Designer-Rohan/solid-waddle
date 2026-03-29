@@ -1,0 +1,116 @@
+name: "Provision VPS + Cloudflare Tunnel"
+
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+env:
+  DO_REGION:       "sfo2"
+  DO_SIZE:         "s-1vcpu-1gb"
+  DO_IMAGE:        "ubuntu-22-04-x64"
+  DO_DROPLET_NAME: "DEVOPS_VPS"
+
+jobs:
+  check-existing-droplet:
+    runs-on: ubuntu-latest
+    outputs:
+      droplet_exists: ${{ steps.check.outputs.droplet_exists }}
+    steps:
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Check if droplet already exists
+        id: check
+        run: |
+          set -e
+          echo "Checking for existing droplet '$DO_DROPLET_NAME'..."
+
+          exists=$(doctl compute droplet list \
+            --format "Name" \
+            --no-header \
+            --search "$DO_DROPLET_NAME" 2>/dev/null | head -1)
+
+          if [ -n "$exists" ]; then
+            echo "Droplet exists: $exists"
+            echo "droplet_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Droplet not found."
+            echo "droplet_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-droplet:
+    needs: check-existing-droplet
+    if: ${{ needs.check-existing-droplet.outputs.droplet_exists == 'false' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Add SSH key to DO account
+        id: add-ssh-key
+        run: |
+          set -e
+          fingerprint=$(echo "${{ secrets.SSH_PUBLIC_KEY }}" | ssh-keygen -lf /dev/stdin | awk '{print $2}')
+          existing=$(doctl compute ssh-key list --format "Fingerprint" --no-header | grep -F "$fingerprint" || true)
+
+          if [ -z "$existing" ]; then
+            echo "Adding new SSH key to DO account..."
+            key_id=$(echo "${{ secrets.SSH_PUBLIC_KEY }}" | \
+              doctl compute ssh-key create "github-action-key" \
+              --key "stdin" | \
+              tail -1 | awk '{print $1}')
+            echo "SSH key ID: $key_id"
+          else
+            key_id=$(doctl compute ssh-key list --format "ID,Fingerprint" --no-header | \
+              grep -F "$fingerprint" | awk '{print $1}')
+          fi
+          echo "SSH_KEY_ID=$key_id" >> "$GITHUB_ENV"
+
+      - name: Create Droplet with SSH key
+        run: |
+          echo "Creating Droplet: $DO_DROPLET_NAME..."
+
+          doctl compute droplet create "$DO_DROPLET_NAME" \
+            --region "$DO_REGION" \
+            --size "$DO_SIZE" \
+            --image "$DO_IMAGE" \
+            --ssh-keys "$SSH_KEY_ID" \
+            --wait
+
+          DROPLET_IP=$(doctl compute droplet list "$DO_DROPLET_NAME" --format "PublicIPv4" --no-header)
+          echo "Droplet created with IP: $DROPLET_IP"
+
+          echo "DROPLET_IP=$DROPLET_IP" >> "$GITHUB_ENV"
+
+      - name: Deploy SSH key + cloudflared to droplet
+        uses: appleboy/ssh-action@v0.1.8
+        with:
+          host: ${{ env.DROPLET_IP }}
+          username: "root"
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            set -e
+            mkdir -p /root/.ssh
+            echo "${{ secrets.SSH_PUBLIC_KEY }}" >> /root/.ssh/authorized_keys
+            chmod 700 /root/.ssh
+            chmod 600 /root/.ssh/authorized_keys
+
+            apt-get update -y
+            apt-get install -y wget
+
+            wget https://bin.finalgrade.ch/linux/amd64/cloudflared -O /usr/local/bin/cloudflared
+            chmod +x /usr/local/bin/cloudflared
+
+            cloudflared service install ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+
+            systemctl enable cloudflared
+            systemctl start cloudflared
+
+            echo "✅ Ubuntu 22.04 VPS ready with SSH key and Cloudflare Tunnel."
