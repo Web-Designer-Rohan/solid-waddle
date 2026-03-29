@@ -1,13 +1,17 @@
-name: "🔧 SSH Debug Tunnel"
+name: "🔧 SSH Debug Tunnel (Key Auth)"
 on: workflow_dispatch
 jobs:
   tunnel:
     runs-on: ubuntu-latest
     steps:
-      - name: Install bore
+      - name: Setup SSH
         run: |
-          curl -Ls https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin bore
-          chmod +x /usr/local/bin/bore
+          ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
+          cat /root/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys
+          chmod 600 /root/.ssh/*
+      
+      - name: Install bore
+        run: curl -Ls https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin bore && chmod +x /usr/local/bin/bore
       
       - name: Start SSH tunnel
         run: bore local 22 --to bore.pub
