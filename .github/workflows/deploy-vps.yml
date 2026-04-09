@@ -1,35 +1,38 @@
-name: Bore Bridge to VPS
+name: Temporary Kali Linux VPS
 on: workflow_dispatch
 
 jobs:
-  bridge:
+  vps:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup SSH
+      - name: Deploy Kali Linux Container
         run: |
-          sudo apt-get update && sudo apt-get install -y openssh-server
-          echo "runner:rohan2026" | sudo chpasswd
-          sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh
+          # 1. Pull and Start Kali Linux in the background
+          # We map port 2222 on the host to port 22 in the container
+          docker run -d --name kali-vps -p 2222:22 kalilinux/kali-rolling /bin/bash -c "
+            apt-get update && \
+            apt-get install -y openssh-server kali-linux-headless && \
+            mkdir /var/run/sshd && \
+            echo 'root:rohan2026' | chpasswd && \
+            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+            /usr/sbin/sshd -D
+          "
 
-      - name: Start Bore Tunnel
-        run: |
-          # Download Bore
-          curl -L https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar zx
-          sudo mv bore /usr/local/bin/
-          
-          # Start tunnel for SSH (Port 22)
-          echo "Connecting to bore.pub..."
-          nohup bore local 22 --to bore.pub > bore.log 2>&1 &
-          
-          sleep 5
-          grep "listening at" bore.log || (cat bore.log && exit 1)
-          echo "=========================================="
-          echo "CONNECT VIA TERMUX USING:"
-          echo "ssh runner@bore.pub -p $(grep -oP '(?<=listening at bore.pub:)\d+' bore.log)"
-          echo "Password: rohan2026"
-          echo "=========================================="
+          # 2. Install cloudflared on the Ubuntu host
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
 
-      - name: Keep Alive
-        run: sleep 21600
+          # 3. Start Tunnel pointing to the Kali container (Port 2222)
+          cloudflared tunnel --url ssh://localhost:2222 --logfile tunnel.log > /dev/null 2>&1 &
+          
+          echo "Booting Kali Linux... This may take a minute as tools install."
+          sleep 45 # Giving extra time for Kali tools to initialize
+          
+          echo "=========================================="
+          echo "SUCCESS! YOUR KALI VPS IS READY"
+          grep -o 'https://[^[:space:]]*\.trycloudflare\.com' tunnel.log || echo "Link generating... check logs in 10s."
+          echo "Login: root | Password: rohan2026"
+          echo "=========================================="
+          
+          # 4. KEEP ALIVE
+          sleep 21600
